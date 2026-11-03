@@ -347,6 +347,33 @@ if st.button("Generate Business Master Data", type="primary", use_container_widt
     matched_count = int((status == "Matched").sum())
     review_count = int((status == "Needs Review").sum())
 
+    # Project Category validation: report whether each required category exists
+    # in the uploaded VBRP dump and list its distinct Item Descriptions.
+    required_project_categories = ["ADDC", "AOOC", "ZHOP", "ZHOC", "ZHDW"]
+    vbrp_category_col = find_header(vbrp_headers, ["Project Category", "Project Cat.", "Project Category Code"])
+    category_validation_rows = []
+    category_detail_rows = []
+    if vbrp_category_col:
+        vbrp_category_values = vbrp[vbrp_category_col].fillna("").astype(str).str.strip().str.upper()
+        for category in required_project_categories:
+            category_records = vbrp.loc[vbrp_category_values == category]
+            descriptions = (
+                category_records[item_col].fillna("").astype(str).str.strip()
+                .loc[lambda values: values.ne("")]
+                .drop_duplicates().tolist()
+            )
+            category_validation_rows.append({
+                "Project Category": category,
+                "Validation Status": "Found" if not category_records.empty else "Not found in uploaded VBRP",
+                "VBRP Records": int(len(category_records)),
+                "Unique Item Descriptions": len(descriptions),
+            })
+            for description in descriptions:
+                category_detail_rows.append({
+                    "Project Category": category,
+                    "VBRP Item Description": description,
+                })
+
     # Remove internal columns from the Business Master output; retain them in the review sheet.
     master_output = result[template_headers].copy()
 
@@ -379,6 +406,30 @@ if st.button("Generate Business Master Data", type="primary", use_container_widt
     a.metric("Output records", len(master_output))
     b.metric("Matched", matched_count)
     c.metric("Needs review", review_count)
+
+    st.subheader("Project Category validation")
+    st.caption("Checks ADDC, AOOC, ZHOP, ZHOC and ZHDW against the uploaded VBRP dump and lists the Item Descriptions available under each category.")
+    if not vbrp_category_col:
+        st.warning("Could not detect a Project Category column in the VBRP file. Please check the column header.")
+    else:
+        category_summary_df = pd.DataFrame(category_validation_rows)
+        st.dataframe(category_summary_df, use_container_width=True, hide_index=True)
+        if category_detail_rows:
+            st.markdown("**VBRP Item Descriptions by Project Category**")
+            category_details_df = pd.DataFrame(category_detail_rows)
+            st.dataframe(category_details_df, use_container_width=True, hide_index=True)
+            st.download_button(
+                "Download Project Category validation",
+                data=category_details_df.to_csv(index=False).encode("utf-8-sig"),
+                file_name="Project_Category_Validation.csv",
+                mime="text/csv",
+            )
+        missing_categories = [r["Project Category"] for r in category_validation_rows if r["Validation Status"] != "Found"]
+        if missing_categories:
+            st.warning("No VBRP records found for: " + ", ".join(missing_categories))
+        else:
+            st.success("All five configured Project Categories are present in the uploaded VBRP dump.")
+
     st.subheader("3. Business Master Data output preview")
     st.dataframe(master_output.head(100), use_container_width=True, hide_index=True)
     st.download_button("Download Business Master Data Excel", data=output.getvalue(), file_name="Generated_Business_Master_Data.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
