@@ -17,25 +17,61 @@ def norm(value):
 def clean(value):
     return re.sub(r"[^a-z0-9]+", " ", str(value).lower()).strip()
 
+def expand_terms(value):
+    # Normalize common business abbreviations and grammatical variants before
+    # comparing Rate Card Track text with historical VBRP Item Descriptions.
+    replacements = {
+        "hw": "hardware",
+        "mgmt": "management",
+        "mgt": "management",
+        "perf": "performance",
+        "app": "application",
+        "apps": "applications",
+        "svc": "service",
+        "svcs": "services",
+        "maint": "maintenance",
+        "infra": "infrastructure",
+        "ops": "operations",
+        "admin": "administration",
+        "sec": "security",
+        "net": "network",
+        "dev": "development",
+        "supp": "support",
+        "manuf": "manufacturing",
+    }
+    tokens = clean(value).split()
+    expanded = [replacements.get(token, token) for token in tokens]
+    # Treat common verb/noun endings consistently (manage/management).
+    normalized = []
+    for token in expanded:
+        if token == "manage":
+            token = "management"
+        elif token == "perform":
+            token = "performance"
+        normalized.append(token)
+    return " ".join(normalized)
+
 def best_match(track_query, candidates, tower_query=""):
-    # Track is the primary matching key because VBRP Item Description often
-    # contains the service/track name (e.g. "SILVER - 8X5") but not the Tower.
-    # Tower is only a small secondary signal for tie-breaking.
-    track = clean(track_query)
-    tower = clean(tower_query)
+    # Track is the primary key; expanded wording handles abbreviations such as
+    # "HW Asset Mgmt, App Perf Mgmt" vs "HARDWARE ASSET MANAGE, APP PERFORMANCE".
+    track = expand_terms(track_query)
+    tower = expand_terms(tower_query)
     if not track:
         return "", 0, None
     best_name, best_score, best_idx = "", 0, None
     for idx, candidate in enumerate(candidates):
-        c = clean(candidate)
+        c = expand_terms(candidate)
         if not c:
             continue
-        track_score = fuzz.token_set_ratio(track, c)
+        scores = [
+            fuzz.token_set_ratio(track, c),
+            fuzz.token_sort_ratio(track, c),
+            fuzz.WRatio(track, c),
+        ]
+        # Tower is a weak secondary signal; it must not hide a strong Track match.
         if tower:
-            combined_score = fuzz.token_set_ratio(f"{tower} {track}", c)
-            score = int(round(track_score * 0.9 + combined_score * 0.1))
-        else:
-            score = int(track_score)
+            scores.append(fuzz.token_set_ratio(f"{tower} {track}", c) * 0.95)
+        score = int(round(max(scores)))
         if score > best_score:
             best_name, best_score, best_idx = str(candidate), score, idx
     return best_name, best_score, best_idx
