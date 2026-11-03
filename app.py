@@ -52,31 +52,38 @@ def expand_terms(value):
     return " ".join(normalized)
 
 def best_match(track_query, candidates, tower_query=""):
-    # Track is the primary key, but SAP service codes embedded in the Tower
-    # (e.g. "SD-01 - Managed Client") must also be recognized in VBRP text
-    # (e.g. "SD01- INTERNET TERMINAL" or simply "SD02").
+    # Track is the primary matching field. Exact normalized matches must always
+    # win over broad fuzzy matches (e.g. "Peoplesoft (Oracle) Apps" must not
+    # collapse to the generic candidate "Oracle").
     track = expand_terms(track_query)
     tower = expand_terms(tower_query)
-    tower_codes = re.findall(r"\bsd\s*[- ]?\s*0?[0-9]+\b", str(tower_query).lower())
+    track_tokens = track.split()
+    tower_codes = re.findall(r"\\bsd\\s*[- ]?\\s*0?[0-9]+\\b", str(tower_query).lower())
     tower_code = re.sub(r"[^a-z0-9]", "", tower_codes[0]) if tower_codes else ""
     if not track and not tower_code:
         return "", 0, None
-    best_name, best_score, best_idx = "", 0, None
+
+    prepared = []
     for idx, candidate in enumerate(candidates):
         raw_candidate = str(candidate)
-        c = expand_terms(raw_candidate)
-        if not c:
-            continue
+        candidate_text = expand_terms(raw_candidate)
+        if candidate_text:
+            prepared.append((idx, raw_candidate, candidate_text))
 
-        candidate_codes = re.findall(r"\bsd\s*[- ]?\s*0?[0-9]+\b", raw_candidate.lower())
+    # Priority 1: exact match after punctuation/case/abbreviation normalization.
+    for idx, raw_candidate, candidate_text in prepared:
+        if track and candidate_text == track:
+            return raw_candidate, 100, idx
+
+    best_name, best_score, best_idx = "", 0, None
+    for idx, raw_candidate, c in prepared:
+        candidate_codes = re.findall(r"\\bsd\\s*[- ]?\\s*0?[0-9]+\\b", raw_candidate.lower())
         candidate_code = re.sub(r"[^a-z0-9]", "", candidate_codes[0]) if candidate_codes else ""
 
-        # A matching SD service code is decisive when the VBRP description is
-        # only the code (e.g. "SD02"), or when its remaining text also matches
-        # the Track. This avoids assigning SD01 Internet Terminal to unrelated
-        # SD01 tracks such as Mobile Devices.
+        # SD service code is a useful secondary identifier, but do not accept
+        # it alone when the candidate's descriptive text conflicts with Track.
         if tower_code and candidate_code == tower_code:
-            description_without_code = re.sub(r"\bsd\s*[- ]?\s*0?[0-9]+\b", " ", raw_candidate, flags=re.I)
+            description_without_code = re.sub(r"\\bsd\\s*[- ]?\\s*0?[0-9]+\\b", " ", raw_candidate, flags=re.I)
             remainder = expand_terms(description_without_code)
             track_score = max(
                 fuzz.token_set_ratio(track, remainder),
@@ -90,16 +97,36 @@ def best_match(track_query, candidates, tower_query=""):
 
         if not track:
             continue
-        scores = [
-            fuzz.token_set_ratio(track, c),
+
+        # Prevent token_set_ratio from treating a generic one-word candidate
+        # ("Oracle") as a perfect match for a more specific multi-word Track.
+        candidate_tokens = set(c.split())
+        query_tokens = set(track_tokens)
+        coverage = (
+            len(query_tokens.intersection(candidate_tokens)) / len(query_tokens)
+            if query_tokens else 0
+        )
+        raw_score = max(
+            fuzz.ratio(track, c),
             fuzz.token_sort_ratio(track, c),
             fuzz.WRatio(track, c),
-        ]
-        if tower:
-            scores.append(fuzz.token_set_ratio(f"{tower} {track}", c) * 0.95)
-        score = int(round(max(scores)))
+        )
+        score = raw_score * coverage
+
+        # Prefer candidate descriptions that contain the full Track phrase;
+        # broad candidates that contain only one generic word are down-ranked.
+        if query_tokens and query_tokens.issubset(candidate_tokens):
+            score = max(score, 96 if c == track else 92)
+
+        # Tower is only a weak tie-breaker and cannot override missing Track terms.
+        if tower and coverage >= 0.5:
+            combined = fuzz.token_set_ratio(f"{tower} {track}", c)
+            score = max(score, min(combined * 0.95, score + 3))
+
+        score = int(round(score))
         if score > best_score:
             best_name, best_score, best_idx = raw_candidate, score, idx
+
     return best_name, best_score, best_idx
 
 def find_header(headers, names):
