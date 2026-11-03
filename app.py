@@ -17,18 +17,27 @@ def norm(value):
 def clean(value):
     return re.sub(r"[^a-z0-9]+", " ", str(value).lower()).strip()
 
-def best_match(query, candidates):
-    q = clean(query)
-    if not q:
+def best_match(track_query, candidates, tower_query=""):
+    # Track is the primary matching key because VBRP Item Description often
+    # contains the service/track name (e.g. "SILVER - 8X5") but not the Tower.
+    # Tower is only a small secondary signal for tie-breaking.
+    track = clean(track_query)
+    tower = clean(tower_query)
+    if not track:
         return "", 0, None
     best_name, best_score, best_idx = "", 0, None
     for idx, candidate in enumerate(candidates):
         c = clean(candidate)
         if not c:
             continue
-        score = fuzz.token_set_ratio(q, c)
+        track_score = fuzz.token_set_ratio(track, c)
+        if tower:
+            combined_score = fuzz.token_set_ratio(f"{tower} {track}", c)
+            score = int(round(track_score * 0.9 + combined_score * 0.1))
+        else:
+            score = int(track_score)
         if score > best_score:
-            best_name, best_score, best_idx = str(candidate), int(score), idx
+            best_name, best_score, best_idx = str(candidate), score, idx
     return best_name, best_score, best_idx
 
 def find_header(headers, names):
@@ -107,7 +116,7 @@ if st.button("Generate Business Master Data", type="primary", use_container_widt
         tower = str(rate_row.get(tower_col, "")).strip()
         track = str(rate_row.get(track_col, "")).strip()
         key = " ".join(x for x in [tower, track] if x)
-        matched_desc, score, match_idx = best_match(key, vbrp_items)
+        matched_desc, score, match_idx = best_match(track, vbrp_items, tower_query=tower)
 
         # Start with blank values in the exact Business Master Data template structure.
         out = {h: "" for h in template_headers}
@@ -125,7 +134,10 @@ if st.button("Generate Business Master Data", type="primary", use_container_widt
             out[tower_out] = tower
         if track_out:
             out[track_out] = track
-        if item_out and match_idx is not None:
+        # Replace the Rate Card product name with the VBRP description only
+        # when the Track-based match meets the confidence threshold.
+        # A weak Bronze-vs-Silver match must not incorrectly reuse Silver.
+        if item_out and match_idx is not None and score >= threshold:
             out[item_out] = matched_desc
 
         # Copy VBRP fields only where the target template has the same header name;
