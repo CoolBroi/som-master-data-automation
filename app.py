@@ -82,7 +82,7 @@ def best_match(track_query, candidates, tower_query=""):
                 fuzz.token_set_ratio(track, remainder),
                 fuzz.WRatio(track, remainder),
             ) if track and remainder else 0
-            if not remainder or track_score >= 45:
+            if not remainder or track_score >= 80:
                 score = 100
                 if score > best_score:
                     best_name, best_score, best_idx = raw_candidate, score, idx
@@ -158,6 +158,13 @@ if st.button("Generate Business Master Data", type="primary", use_container_widt
         st.error("The uploaded Business Master Data template has no column headers.")
         st.stop()
 
+    # Detect project/company fields so descriptions are matched only within
+    # the same SAP project and company code whenever those fields are available.
+    rate_project_col = find_header(rate_headers, ["Project Code", "Project definition", "PSPID"])
+    rate_company_col = find_header(rate_headers, ["Company Code", "CoCd", "BUKRS"])
+    vbrp_project_col = find_header(vbrp_headers, ["Project definition", "Project Code", "PSPID"])
+    vbrp_company_col = find_header(vbrp_headers, ["CoCd", "Company Code", "BUKRS"])
+
     # Build VBRP candidate descriptions and prepare a fresh output row per Rate Card record.
     vbrp_items = vbrp[item_col].fillna("").astype(str).tolist()
     output_rows = []
@@ -178,7 +185,29 @@ if st.button("Generate Business Master Data", type="primary", use_container_widt
         tower = str(rate_row.get(tower_col, "")).strip()
         track = str(rate_row.get(track_col, "")).strip()
         key = " ".join(x for x in [tower, track] if x)
-        matched_desc, score, match_idx = best_match(track, vbrp_items, tower_query=tower)
+
+        # Restrict VBRP candidates to the same Project Code and Company Code.
+        # This prevents a similar description from another project/customer
+        # from being selected accidentally.
+        candidate_positions = list(range(len(vbrp)))
+        if rate_project_col and vbrp_project_col:
+            rate_project = norm(rate_row.get(rate_project_col, ""))
+            if rate_project:
+                candidate_positions = [
+                    pos for pos in candidate_positions
+                    if norm(vbrp.iloc[pos].get(vbrp_project_col, "")) == rate_project
+                ]
+        if rate_company_col and vbrp_company_col:
+            rate_company = norm(rate_row.get(rate_company_col, ""))
+            if rate_company:
+                candidate_positions = [
+                    pos for pos in candidate_positions
+                    if norm(vbrp.iloc[pos].get(vbrp_company_col, "")) == rate_company
+                ]
+
+        scoped_items = [vbrp_items[pos] for pos in candidate_positions]
+        matched_desc, score, scoped_match_idx = best_match(track, scoped_items, tower_query=tower)
+        match_idx = candidate_positions[scoped_match_idx] if scoped_match_idx is not None else None
 
         # Start with blank values in the exact Business Master Data template structure.
         out = {h: "" for h in template_headers}
