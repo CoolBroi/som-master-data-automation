@@ -43,11 +43,23 @@ def expand_terms(value):
     expanded = [replacements.get(token, token) for token in tokens]
     # Treat common verb/noun endings consistently (manage/management).
     normalized = []
+    singular_forms = {
+        "terminals": "terminal",
+        "devices": "device",
+        "applications": "application",
+        "services": "service",
+        "clients": "client",
+        "printers": "printer",
+        "descriptions": "description",
+        "assets": "asset",
+        "technologies": "technology",
+    }
     for token in expanded:
         if token == "manage":
             token = "management"
         elif token == "perform":
             token = "performance"
+        token = singular_forms.get(token, token)
         normalized.append(token)
     return " ".join(normalized)
 
@@ -109,13 +121,19 @@ def best_match(track_query, candidates, tower_query=""):
         raw_score = max(
             fuzz.ratio(track, c),
             fuzz.token_sort_ratio(track, c),
+            fuzz.token_set_ratio(track, c),
             fuzz.WRatio(track, c),
         )
-        score = raw_score * coverage
+        # Blend textual similarity with query-token coverage instead of
+        # multiplying by coverage. Multiplication was overly strict and caused
+        # valid abbreviated/partially worded service descriptions to fall below
+        # the confidence threshold.
+        score = (raw_score * 0.80) + (coverage * 20)
 
-        # Prefer candidate descriptions that contain the full multi-word Track.
-        # For a single-word Track (e.g. "Dispatch"), do not auto-accept a longer
-        # qualified description (e.g. "Smart Dispatch - Italy") as equivalent.
+        # Exact full phrase always wins. If every Track token is present in a
+        # longer description, accept as a strong match. A one-word Track is
+        # capped when it appears only inside a qualified description so that
+        # "Dispatch" does not become "Smart Dispatch - Italy".
         if query_tokens and query_tokens.issubset(candidate_tokens):
             if c == track:
                 score = 100
