@@ -58,7 +58,7 @@ def best_match(track_query, candidates, tower_query=""):
     track = expand_terms(track_query)
     tower = expand_terms(tower_query)
     track_tokens = track.split()
-    tower_codes = re.findall(r"\\bsd\\s*[- ]?\\s*0?[0-9]+\\b", str(tower_query).lower())
+    tower_codes = re.findall(r"\bsd\\s*[- ]?\\s*0?[0-9]+\\b", str(tower_query).lower())
     tower_code = re.sub(r"[^a-z0-9]", "", tower_codes[0]) if tower_codes else ""
     if not track and not tower_code:
         return "", 0, None
@@ -77,13 +77,13 @@ def best_match(track_query, candidates, tower_query=""):
 
     best_name, best_score, best_idx = "", 0, None
     for idx, raw_candidate, c in prepared:
-        candidate_codes = re.findall(r"\\bsd\\s*[- ]?\\s*0?[0-9]+\\b", raw_candidate.lower())
+        candidate_codes = re.findall(r"\bsd\\s*[- ]?\\s*0?[0-9]+\\b", raw_candidate.lower())
         candidate_code = re.sub(r"[^a-z0-9]", "", candidate_codes[0]) if candidate_codes else ""
 
         # SD service code is a useful secondary identifier, but do not accept
         # it alone when the candidate's descriptive text conflicts with Track.
         if tower_code and candidate_code == tower_code:
-            description_without_code = re.sub(r"\\bsd\\s*[- ]?\\s*0?[0-9]+\\b", " ", raw_candidate, flags=re.I)
+            description_without_code = re.sub(r"\bsd\\s*[- ]?\\s*0?[0-9]+\\b", " ", raw_candidate, flags=re.I)
             remainder = expand_terms(description_without_code)
             track_score = max(
                 fuzz.token_set_ratio(track, remainder),
