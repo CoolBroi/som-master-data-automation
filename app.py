@@ -75,6 +75,21 @@ with c2:
     item_col = st.selectbox("Item Description column", vbrp_headers, index=vbrp_headers.index(find_header(vbrp_headers, ["Item Description", "ARKTX", "Description"])) if find_header(vbrp_headers, ["Item Description", "ARKTX", "Description"]) in vbrp_headers else 0)
 
 st.caption("Matching key = Rate Card Tower + Track, compared against VBRP Item Description. The output will retain the Business Master Data template's column names.")
+
+# Explicitly select the source field used to group duplicate products.
+# Exact header matching is used for the default so a generic column like Product
+# cannot accidentally be selected instead of SOW Product Name.
+product_name_aliases = {"sowproductname", "productname", "productdescription"}
+product_name_default = next(
+    (i for i, h in enumerate(rate_headers) if norm(h) in product_name_aliases),
+    0,
+)
+product_name_col = st.selectbox(
+    "Rate Card column used to identify the product name (Migration Key grouping)",
+    rate_headers,
+    index=product_name_default,
+    help="Rows with the same value in this column receive the same Migration Key, even when Tower and Track differ. Select the column that contains values such as Software or HDC HOSTING.",
+)
 with st.expander("Optional: map important output columns"):
     st.write("Choose output columns to receive the matched values. Other output columns are populated automatically when their headers match a source column name.")
     tower_target = st.selectbox("Output column for Tower", ["(Auto-detect)"] + template_headers, index=(template_headers.index(find_header(template_headers, ["Tower"])) + 1) if find_header(template_headers, ["Tower"]) in template_headers else 0)
@@ -98,11 +113,7 @@ if st.button("Generate Business Master Data", type="primary", use_container_widt
     item_out = item_target if item_target != "(Auto-detect)" else find_header(template_headers, ["SOW Product Name", "Item Description", "Display text"])
 
     # Use the first Business Master Data template column for Migration Key.
-    # Repeated SOW Product Names share one key, even when Tower/Track differ.
-    product_name_col = find_header(rate_headers, ["SOW Product Name", "Product Name", "Product Description"])
-    if product_name_col is None:
-        st.error("Could not identify the product-name column in the Rate Card. Please ensure it contains a SOW Product Name or Product Name header.")
-        st.stop()
+    # Grouping uses the explicitly selected Rate Card product-name field.
     migration_key_col = template_headers[0]
     name_to_migration_key = {}
     next_key_number = 1
