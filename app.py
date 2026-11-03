@@ -63,95 +63,101 @@ def expand_terms(value):
         normalized.append(token)
     return " ".join(normalized)
 
-def best_match(track_query, candidates, tower_query=""):
-    # Track is the primary matching field. Exact normalized matches must always
-    # win over broad fuzzy matches (e.g. "Peoplesoft (Oracle) Apps" must not
-    # collapse to the generic candidate "Oracle").
-    track = expand_terms(track_query)
-    tower = expand_terms(tower_query)
-    track_tokens = track.split()
-    tower_codes = re.findall(r"\bsd\s*[- ]?\s*0?[0-9]+\b", str(tower_query).lower())
-    tower_code = re.sub(r"[^a-z0-9]", "", tower_codes[0]) if tower_codes else ""
-    if not track and not tower_code:
+def best_match(track_query, candidates, tower_query="", min_confidence=80):
+    # Matching order:
+    # 1) Track alone (including compact exact match such as AlwaysONVPN = ALWAYS ON VPN).
+    # 2) If Track alone is not sufficiently confident, retry with Tower + Track.
+    # This prevents Tower wording from diluting an otherwise exact Track match.
+    track_raw = str(track_query or "").strip()
+    tower_raw = str(tower_query or "").strip()
+    track = expand_terms(track_raw)
+    tower = expand_terms(tower_raw)
+    if not track and not tower:
         return "", 0, None
 
     prepared = []
     for idx, candidate in enumerate(candidates):
-        raw_candidate = str(candidate)
+        raw_candidate = str(candidate or "").strip()
         candidate_text = expand_terms(raw_candidate)
         if candidate_text:
             prepared.append((idx, raw_candidate, candidate_text))
 
-    # Priority 1: exact match after punctuation/case/abbreviation normalization.
-    for idx, raw_candidate, candidate_text in prepared:
-        if track and candidate_text == track:
-            return raw_candidate, 100, idx
+    # Exact compact comparison ignores spaces, hyphens and punctuation.
+    # Example: "AlwaysONVPN" matches "ALWAYS ON VPN".
+    compact_track = norm(track_raw)
+    if compact_track:
+        for idx, raw_candidate, candidate_text in prepared:
+            if norm(raw_candidate) == compact_track:
+                return raw_candidate, 100, idx
 
-    best_name, best_score, best_idx = "", 0, None
-    for idx, raw_candidate, c in prepared:
-        candidate_codes = re.findall(r"\bsd\s*[- ]?\s*0?[0-9]+\b", raw_candidate.lower())
-        candidate_code = re.sub(r"[^a-z0-9]", "", candidate_codes[0]) if candidate_codes else ""
+    def score_query(query_text, allow_specificity_guard=True):
+        query_tokens = set(query_text.split())
+        best_name, best_score, best_idx = "", 0, None
+        if not query_tokens:
+            return best_name, best_score, best_idx
 
-        # SD service code is a useful secondary identifier, but do not accept
-        # it alone when the candidate's descriptive text conflicts with Track.
-        if tower_code and candidate_code == tower_code:
-            description_without_code = re.sub(r"\bsd\s*[- ]?\s*0?[0-9]+\b", " ", raw_candidate, flags=re.I)
-            remainder = expand_terms(description_without_code)
-            track_score = max(
-                fuzz.token_set_ratio(track, remainder),
-                fuzz.WRatio(track, remainder),
-            ) if track and remainder else 0
-            if not remainder or track_score >= 80:
-                score = 100
-                if score > best_score:
-                    best_name, best_score, best_idx = raw_candidate, score, idx
-                continue
+        for idx, raw_candidate, candidate_text in prepared:
+            candidate_tokens = set(candidate_text.split())
+            coverage = (
+                len(query_tokens.intersection(candidate_tokens)) / len(query_tokens)
+                if query_tokens else 0
+            )
+            raw_score = max(
+                fuzz.ratio(query_text, candidate_text),
+                fuzz.token_sort_ratio(query_text, candidate_text),
+                fuzz.token_set_ratio(query_text, candidate_text),
+                fuzz.WRatio(query_text, candidate_text),
+            )
+            score = (raw_score * 0.80) + (coverage * 20)
 
-        if not track:
-            continue
+            if query_tokens.issubset(candidate_tokens):
+                if candidate_text == query_text:
+                    score = 100
+                elif allow_specificity_guard and len(query_tokens) == 1:
+                    # "Dispatch" must not be auto-matched to "Smart Dispatch - Italy".
+                    score = min(score, 79)
+                else:
+                    score = max(score, 92)
 
-        # Prevent token_set_ratio from treating a generic one-word candidate
-        # ("Oracle") as a perfect match for a more specific multi-word Track.
-        candidate_tokens = set(c.split())
-        query_tokens = set(track_tokens)
-        coverage = (
-            len(query_tokens.intersection(candidate_tokens)) / len(query_tokens)
-            if query_tokens else 0
-        )
-        raw_score = max(
-            fuzz.ratio(track, c),
-            fuzz.token_sort_ratio(track, c),
-            fuzz.token_set_ratio(track, c),
-            fuzz.WRatio(track, c),
-        )
-        # Blend textual similarity with query-token coverage instead of
-        # multiplying by coverage. Multiplication was overly strict and caused
-        # valid abbreviated/partially worded service descriptions to fall below
-        # the confidence threshold.
-        score = (raw_score * 0.80) + (coverage * 20)
+            score = int(round(score))
+            if score > best_score:
+                best_name, best_score, best_idx = raw_candidate, score, idx
+        return best_name, best_score, best_idx
 
-        # Exact full phrase always wins. If every Track token is present in a
-        # longer description, accept as a strong match. A one-word Track is
-        # capped when it appears only inside a qualified description so that
-        # "Dispatch" does not become "Smart Dispatch - Italy".
-        if query_tokens and query_tokens.issubset(candidate_tokens):
-            if c == track:
-                score = 100
-            elif len(query_tokens) == 1:
-                score = min(score, 79)
-            else:
-                score = max(score, 92)
+    # PASS 1: search using Track alone. Return immediately if it clears the
+    # configured confidence threshold.
+    track_name, track_score, track_idx = score_query(track)
+    if track_idx is not None and track_score >= min_confidence:
+        return track_name, track_score, track_idx
 
-        # Tower is only a weak tie-breaker and cannot override missing Track terms.
-        if tower and coverage >= 0.5:
-            combined = fuzz.token_set_ratio(f"{tower} {track}", c)
-            score = max(score, min(combined * 0.95, score + 3))
+    # PASS 2: only if Track alone is not confident enough, try Tower + Track.
+    combined_query = " ".join(x for x in [tower, track] if x)
+    combined_name, combined_score, combined_idx = score_query(
+        combined_query, allow_specificity_guard=False
+    )
 
-        score = int(round(score))
-        if score > best_score:
-            best_name, best_score, best_idx = raw_candidate, score, idx
+    # Preserve SD service-code recognition as a fallback, but require the
+    # candidate description (after removing SD code) to agree with Track.
+    tower_codes = re.findall(r"\\bsd\\s*[- ]?\\s*0?[0-9]+\\b", tower_raw.lower())
+    tower_code = re.sub(r"[^a-z0-9]", "", tower_codes[0]) if tower_codes else ""
+    if tower_code:
+        for idx, raw_candidate, candidate_text in prepared:
+            candidate_codes = re.findall(r"\\bsd\\s*[- ]?\\s*0?[0-9]+\\b", raw_candidate.lower())
+            candidate_code = re.sub(r"[^a-z0-9]", "", candidate_codes[0]) if candidate_codes else ""
+            if candidate_code == tower_code:
+                remainder_raw = re.sub(r"\\bsd\\s*[- ]?\\s*0?[0-9]+\\b", " ", raw_candidate, flags=re.I)
+                remainder = expand_terms(remainder_raw)
+                if not remainder:
+                    return raw_candidate, 100, idx
+                if track:
+                    desc_score = max(fuzz.token_sort_ratio(track, remainder), fuzz.WRatio(track, remainder))
+                    if desc_score >= min_confidence and desc_score > combined_score:
+                        combined_name, combined_score, combined_idx = raw_candidate, int(desc_score), idx
 
-    return best_name, best_score, best_idx
+    # Keep the better result for the review screen if neither pass cleared threshold.
+    if track_score > combined_score:
+        return track_name, track_score, track_idx
+    return combined_name, combined_score, combined_idx
 
 def find_header(headers, names):
     lookup = {norm(h): h for h in headers}
@@ -257,7 +263,7 @@ if st.button("Generate Business Master Data", type="primary", use_container_widt
                 ]
 
         scoped_items = [vbrp_items[pos] for pos in candidate_positions]
-        matched_desc, score, scoped_match_idx = best_match(track, scoped_items, tower_query=tower)
+        matched_desc, score, scoped_match_idx = best_match(track, scoped_items, tower_query=tower, min_confidence=threshold)
         match_idx = candidate_positions[scoped_match_idx] if scoped_match_idx is not None else None
 
         # Start with blank values in the exact Business Master Data template structure.
