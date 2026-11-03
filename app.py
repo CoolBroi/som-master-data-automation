@@ -113,10 +113,16 @@ def best_match(track_query, candidates, tower_query=""):
         )
         score = raw_score * coverage
 
-        # Prefer candidate descriptions that contain the full Track phrase;
-        # broad candidates that contain only one generic word are down-ranked.
+        # Prefer candidate descriptions that contain the full multi-word Track.
+        # For a single-word Track (e.g. "Dispatch"), do not auto-accept a longer
+        # qualified description (e.g. "Smart Dispatch - Italy") as equivalent.
         if query_tokens and query_tokens.issubset(candidate_tokens):
-            score = max(score, 96 if c == track else 92)
+            if c == track:
+                score = 100
+            elif len(query_tokens) == 1:
+                score = min(score, 79)
+            else:
+                score = max(score, 92)
 
         # Tower is only a weak tie-breaker and cannot override missing Track terms.
         if tower and coverage >= 0.5:
