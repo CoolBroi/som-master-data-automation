@@ -138,14 +138,14 @@ def best_match(track_query, candidates, tower_query="", min_confidence=80):
 
     # Preserve SD service-code recognition as a fallback, but require the
     # candidate description (after removing SD code) to agree with Track.
-    tower_codes = re.findall(r"\\bsd\\s*[- ]?\\s*0?[0-9]+\\b", tower_raw.lower())
+    tower_codes = re.findall(r"\bsd\\s*[- ]?\\s*0?[0-9]+\\b", tower_raw.lower())
     tower_code = re.sub(r"[^a-z0-9]", "", tower_codes[0]) if tower_codes else ""
     if tower_code:
         for idx, raw_candidate, candidate_text in prepared:
-            candidate_codes = re.findall(r"\\bsd\\s*[- ]?\\s*0?[0-9]+\\b", raw_candidate.lower())
+            candidate_codes = re.findall(r"\bsd\\s*[- ]?\\s*0?[0-9]+\\b", raw_candidate.lower())
             candidate_code = re.sub(r"[^a-z0-9]", "", candidate_codes[0]) if candidate_codes else ""
             if candidate_code == tower_code:
-                remainder_raw = re.sub(r"\\bsd\\s*[- ]?\\s*0?[0-9]+\\b", " ", raw_candidate, flags=re.I)
+                remainder_raw = re.sub(r"\bsd\\s*[- ]?\\s*0?[0-9]+\\b", " ", raw_candidate, flags=re.I)
                 remainder = expand_terms(remainder_raw)
                 if not remainder:
                     return raw_candidate, 100, idx
