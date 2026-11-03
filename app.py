@@ -52,28 +52,54 @@ def expand_terms(value):
     return " ".join(normalized)
 
 def best_match(track_query, candidates, tower_query=""):
-    # Track is the primary key; expanded wording handles abbreviations such as
-    # "HW Asset Mgmt, App Perf Mgmt" vs "HARDWARE ASSET MANAGE, APP PERFORMANCE".
+    # Track is the primary key, but SAP service codes embedded in the Tower
+    # (e.g. "SD-01 - Managed Client") must also be recognized in VBRP text
+    # (e.g. "SD01- INTERNET TERMINAL" or simply "SD02").
     track = expand_terms(track_query)
     tower = expand_terms(tower_query)
-    if not track:
+    tower_codes = re.findall(r"\bsd\s*[- ]?\s*0?[0-9]+\b", str(tower_query).lower())
+    tower_code = re.sub(r"[^a-z0-9]", "", tower_codes[0]) if tower_codes else ""
+    if not track and not tower_code:
         return "", 0, None
     best_name, best_score, best_idx = "", 0, None
     for idx, candidate in enumerate(candidates):
-        c = expand_terms(candidate)
+        raw_candidate = str(candidate)
+        c = expand_terms(raw_candidate)
         if not c:
+            continue
+
+        candidate_codes = re.findall(r"\bsd\s*[- ]?\s*0?[0-9]+\b", raw_candidate.lower())
+        candidate_code = re.sub(r"[^a-z0-9]", "", candidate_codes[0]) if candidate_codes else ""
+
+        # A matching SD service code is decisive when the VBRP description is
+        # only the code (e.g. "SD02"), or when its remaining text also matches
+        # the Track. This avoids assigning SD01 Internet Terminal to unrelated
+        # SD01 tracks such as Mobile Devices.
+        if tower_code and candidate_code == tower_code:
+            description_without_code = re.sub(r"\bsd\s*[- ]?\s*0?[0-9]+\b", " ", raw_candidate, flags=re.I)
+            remainder = expand_terms(description_without_code)
+            track_score = max(
+                fuzz.token_set_ratio(track, remainder),
+                fuzz.WRatio(track, remainder),
+            ) if track and remainder else 0
+            if not remainder or track_score >= 45:
+                score = 100
+                if score > best_score:
+                    best_name, best_score, best_idx = raw_candidate, score, idx
+                continue
+
+        if not track:
             continue
         scores = [
             fuzz.token_set_ratio(track, c),
             fuzz.token_sort_ratio(track, c),
             fuzz.WRatio(track, c),
         ]
-        # Tower is a weak secondary signal; it must not hide a strong Track match.
         if tower:
             scores.append(fuzz.token_set_ratio(f"{tower} {track}", c) * 0.95)
         score = int(round(max(scores)))
         if score > best_score:
-            best_name, best_score, best_idx = str(candidate), score, idx
+            best_name, best_score, best_idx = raw_candidate, score, idx
     return best_name, best_score, best_idx
 
 def find_header(headers, names):
