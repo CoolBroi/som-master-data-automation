@@ -97,11 +97,31 @@ if st.button("Generate Business Master Data", type="primary", use_container_widt
     track_out = track_target if track_target != "(Auto-detect)" else find_header(template_headers, ["Track"])
     item_out = item_target if item_target != "(Auto-detect)" else find_header(template_headers, ["SOW Product Name", "Item Description", "Display text"])
 
+    # Use the first Business Master Data template column for Migration Key.
+    # Repeated SOW Product Names share one key, even when Tower/Track differ.
+    product_name_col = find_header(rate_headers, ["SOW Product Name", "Product Name", "Product Description"])
+    if product_name_col is None:
+        st.error("Could not identify the product-name column in the Rate Card. Please ensure it contains a SOW Product Name or Product Name header.")
+        st.stop()
+    migration_key_col = template_headers[0]
+    name_to_migration_key = {}
+    next_key_number = 1
+
     for i, (_, rate_row) in enumerate(rate.iterrows()):
         tower = str(rate_row.get(tower_col, "")).strip()
         track = str(rate_row.get(track_col, "")).strip()
+        product_name = str(rate_row.get(product_name_col, "")).strip()
         key = " ".join(x for x in [tower, track] if x)
         matched_desc, score, match_idx = best_match(key, vbrp_items)
+
+        # Assign one stable migration key per normalized product name.
+        # Blank names are treated as separate records to avoid accidental grouping.
+        normalized_product_name = clean(product_name)
+        group_identity = normalized_product_name if normalized_product_name else f"__blank_row_{i}"
+        if group_identity not in name_to_migration_key:
+            name_to_migration_key[group_identity] = f"MK{next_key_number:03d}"
+            next_key_number += 1
+        migration_key = name_to_migration_key[group_identity]
 
         # Start with blank values in the exact Business Master Data template structure.
         out = {h: "" for h in template_headers}
@@ -113,7 +133,8 @@ if st.button("Generate Business Master Data", type="primary", use_container_widt
             if source_header:
                 out[target_header] = rate_row.get(source_header, "")
 
-        # Apply explicit/alias mappings for Tower and Track.
+        # Apply Migration Key and explicit/alias mappings.
+        out[migration_key_col] = migration_key
         if tower_out:
             out[tower_out] = tower
         if track_out:
@@ -131,12 +152,16 @@ if st.button("Generate Business Master Data", type="primary", use_container_widt
                 if source_header and not str(out.get(target_header, "")).strip():
                     out[target_header] = vrow.get(source_header, "")
 
+        out["__Migration Key"] = migration_key
+        out["__Product Name Group"] = product_name
         out["__Match Confidence"] = score
         out["__Matched VBRP Description"] = matched_desc
         out["__Match Status"] = "Matched" if score >= threshold else "Needs Review"
         output_rows.append(out)
         if score < threshold:
             review_rows.append({
+                "Migration Key": migration_key,
+                "Product Name": product_name,
                 "Rate Card Tower": tower,
                 "Rate Card Track": track,
                 "Combined Matching Key": key,
