@@ -76,20 +76,6 @@ with c2:
 
 st.caption("Matching key = Rate Card Tower + Track, compared against VBRP Item Description. The output will retain the Business Master Data template's column names.")
 
-# Explicitly select the source field used to group duplicate products.
-# Exact header matching is used for the default so a generic column like Product
-# cannot accidentally be selected instead of SOW Product Name.
-product_name_aliases = {"sowproductname", "productname", "productdescription"}
-product_name_default = next(
-    (i for i, h in enumerate(rate_headers) if norm(h) in product_name_aliases),
-    0,
-)
-product_name_col = st.selectbox(
-    "Rate Card column used to identify the product name (Migration Key grouping)",
-    rate_headers,
-    index=product_name_default,
-    help="Rows with the same value in this column receive the same Migration Key, even when Tower and Track differ. Select the column that contains values such as Software or HDC HOSTING.",
-)
 with st.expander("Optional: map important output columns"):
     st.write("Choose output columns to receive the matched values. Other output columns are populated automatically when their headers match a source column name.")
     tower_target = st.selectbox("Output column for Tower", ["(Auto-detect)"] + template_headers, index=(template_headers.index(find_header(template_headers, ["Tower"])) + 1) if find_header(template_headers, ["Tower"]) in template_headers else 0)
@@ -112,27 +98,16 @@ if st.button("Generate Business Master Data", type="primary", use_container_widt
     track_out = track_target if track_target != "(Auto-detect)" else find_header(template_headers, ["Track"])
     item_out = item_target if item_target != "(Auto-detect)" else find_header(template_headers, ["SOW Product Name", "Item Description", "Display text"])
 
-    # Use the first Business Master Data template column for Migration Key.
-    # Grouping uses the explicitly selected Rate Card product-name field.
+    # The first Business Master Data template column stores Migration Key.
+    # Keys are assigned only AFTER the final output rows and SOW Product Name
+    # values have been generated.
     migration_key_col = template_headers[0]
-    name_to_migration_key = {}
-    next_key_number = 1
 
     for i, (_, rate_row) in enumerate(rate.iterrows()):
         tower = str(rate_row.get(tower_col, "")).strip()
         track = str(rate_row.get(track_col, "")).strip()
-        product_name = str(rate_row.get(product_name_col, "")).strip()
         key = " ".join(x for x in [tower, track] if x)
         matched_desc, score, match_idx = best_match(key, vbrp_items)
-
-        # Assign one stable migration key per normalized product name.
-        # Blank names are treated as separate records to avoid accidental grouping.
-        normalized_product_name = clean(product_name)
-        group_identity = normalized_product_name if normalized_product_name else f"__blank_row_{i}"
-        if group_identity not in name_to_migration_key:
-            name_to_migration_key[group_identity] = f"MK{next_key_number:03d}"
-            next_key_number += 1
-        migration_key = name_to_migration_key[group_identity]
 
         # Start with blank values in the exact Business Master Data template structure.
         out = {h: "" for h in template_headers}
@@ -145,7 +120,7 @@ if st.button("Generate Business Master Data", type="primary", use_container_widt
                 out[target_header] = rate_row.get(source_header, "")
 
         # Apply Migration Key and explicit/alias mappings.
-        out[migration_key_col] = migration_key
+        out[migration_key_col] = ""
         if tower_out:
             out[tower_out] = tower
         if track_out:
@@ -163,26 +138,51 @@ if st.button("Generate Business Master Data", type="primary", use_container_widt
                 if source_header and not str(out.get(target_header, "")).strip():
                     out[target_header] = vrow.get(source_header, "")
 
-        out["__Migration Key"] = migration_key
-        out["__Product Name Group"] = product_name
+        out["__Migration Key"] = ""
         out["__Match Confidence"] = score
         out["__Matched VBRP Description"] = matched_desc
         out["__Match Status"] = "Matched" if score >= threshold else "Needs Review"
         output_rows.append(out)
-        if score < threshold:
-            review_rows.append({
-                "Migration Key": migration_key,
-                "Product Name": product_name,
-                "Rate Card Tower": tower,
-                "Rate Card Track": track,
-                "Combined Matching Key": key,
-                "Best VBRP Item Description": matched_desc,
-                "Confidence": score,
-                "Status": "Needs Review",
-            })
         progress.progress((i + 1) / max(len(rate), 1))
 
     result = pd.DataFrame(output_rows)
+
+    # IMPORTANT: assign Migration Keys from the FINAL generated Business
+    # Master Data product-name column, after VBRP matching/population.
+    # Therefore the final SOW Product Name is the single source of truth.
+    final_product_name_col = item_out
+    if not final_product_name_col or final_product_name_col not in result.columns:
+        st.error("Could not identify the final SOW Product Name output column. Please map the output column in the optional mapping section and try again.")
+        st.stop()
+
+    name_to_migration_key = {}
+    migration_keys = []
+    next_key_number = 1
+    for row_number, final_name in enumerate(result[final_product_name_col].fillna("").astype(str)):
+        normalized_name = clean(final_name)
+        # Empty final names must not be grouped together.
+        group_identity = normalized_name if normalized_name else f"__blank_final_name_row_{row_number}"
+        if group_identity not in name_to_migration_key:
+            name_to_migration_key[group_identity] = f"MK{next_key_number:03d}"
+            next_key_number += 1
+        migration_keys.append(name_to_migration_key[group_identity])
+
+    result["__Migration Key"] = migration_keys
+    result[migration_key_col] = migration_keys
+
+    # Build review rows after Migration Keys have been assigned from final output names.
+    review_rows = []
+    for _, row in result[result["__Match Status"] == "Needs Review"].iterrows():
+        review_rows.append({
+            "Migration Key": row["__Migration Key"],
+            "Product Name": row[final_product_name_col],
+            "Rate Card Tower": row.get(tower_out, ""),
+            "Rate Card Track": row.get(track_out, ""),
+            "Best VBRP Item Description": row.get(item_out, ""),
+            "Confidence": row["__Match Confidence"],
+            "Status": row["__Match Status"],
+        })
+
     status = result["__Match Status"]
     matched_count = int((status == "Matched").sum())
     review_count = int((status == "Needs Review").sum())
